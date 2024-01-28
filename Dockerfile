@@ -26,6 +26,7 @@ RUN pip install --upgrade pip && \
     pip install -r /requirements.txt && \
     rm /requirements.txt
 
+RUN pip install flash-attn
 # Cache Models
 COPY builder/cache_model.py /cache_model.py
 RUN python /cache_model.py && \
