@@ -12,7 +12,7 @@ from transformers import (
     pipeline,
 )
 import yt_dlp as youtube_dl
-from diarization import diarize
+from diarization import diarize, build_result
 
 # If your handler runs inference on a model, load the model here.
 # You will want models to be loaded into memory before starting serverless.
@@ -133,7 +133,7 @@ def handler(job):
 
     input_source = job_input.get("type", "URL")  # URL or YOUTUBE
     file_url = job_input.get("audio_url", None)
-    model_id = job_input["model_id"]
+    model_id = job_input.get("model_id", "openai/whisper-large-v3")
     chunk_length = job_input.get("chunk_length", 30)
     batch_size = job_input.get("batch_size", 24)
     diarization = job_input.get("diarization", False)
@@ -163,13 +163,11 @@ def handler(job):
             diarization_model, hf_token, device_id, audio_file_path, transcription
         )
         return build_result(speakers_transcript, transcription)
-    else:
-        return transcription
 
     # Cleanup: Remove the downloaded file
     os.remove(audio_file_path)
 
-    return result
+    return transcription
 
 
 runpod.serverless.start({"handler": handler})
