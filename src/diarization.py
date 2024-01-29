@@ -174,7 +174,7 @@ def post_process_segments_and_transcripts(
     return segmented_preds
 
 
-def diarize(diarization_model, hf_token, device_id, file_name, outputs):
+def diarize(diarization_model, hf_token, device_id, file_name, outputs, group_by_speaker=False):
     diarization_pipeline = Pipeline.from_pretrained(
         checkpoint_path=diarization_model,
         use_auth_token=hf_token,
@@ -189,5 +189,5 @@ def diarize(diarization_model, hf_token, device_id, file_name, outputs):
     print(segments)
 
     return post_process_segments_and_transcripts(
-        segments, outputs["chunks"], group_by_speaker=False
+        segments, outputs["chunks"], group_by_speaker=group_by_speaker
     )
