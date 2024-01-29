@@ -139,6 +139,8 @@ def handler(job):
     diarization = job_input.get("diarization", False)
     translation = job_input.get("translation", False)
     language = job_input.get("language", "en")
+    flash = job_input.get("flash", False)
+    device_id = job_input.get("device_id", "0")
 
     if not file_url:
         return "No audio URL provided."
@@ -153,7 +155,30 @@ def handler(job):
         audio_file_path = download_youtube_video(file_url)
 
     # Run Whisper model inference
-    transcription = transcribe(audio_file_path, chunk_length, batch_size)
+    # transcription = transcribe(audio_file_path, chunk_length, batch_size)
+    pipe = pipeline(
+        "automatic-speech-recognition",
+        model=model_id,
+        torch_dtype=torch.float16,
+        device="mps" if device_id == "mps" else f"cuda:{device_id}",
+        model_kwargs={"attn_implementation": "flash_attention_2"}
+        if flash
+        else {"attn_implementation": "sdpa"},
+    )
+    if device_id == "mps":
+        torch.mps.empty_cache()
+    ts = True  # Timestamps
+    generate_kwargs = {
+        "task": "translate" if translation else "transcribe",
+        "language": language,
+    }
+    transcription = pipe(
+        audio_file_path,
+        chunk_length_s=30,
+        batch_size=batch_size,
+        generate_kwargs=generate_kwargs,
+        return_timestamps=ts,
+    )
 
     if diarization:
         diarization_model = "pyannote/speaker-diarization-3.1"
