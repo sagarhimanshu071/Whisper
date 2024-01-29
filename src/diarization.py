@@ -80,16 +80,50 @@ def diarize_audio(diarizer_inputs, diarization_pipeline):
         {"waveform": diarizer_inputs, "sample_rate": 16000},
     )
 
-    # segments = []
-    # for segment, track, label in diarization.itertracks(yield_label=True):
-    #     segments.append(
-    #         {
-    #             "segment": {"start": segment.start, "end": segment.end},
-    #             "track": track,
-    #             "label": label,
-    #         }
-    #     )
-    return diarization
+    segments = []
+    for segment, track, label in diarization.itertracks(yield_label=True):
+        segments.append(
+            {
+                "segment": {"start": segment.start, "end": segment.end},
+                "track": track,
+                "label": label,
+            }
+        )
+
+    # diarizer output may contain consecutive segments from the same speaker (e.g. {(0 -> 1, speaker_1), (1 -> 1.5, speaker_1), ...})
+    # we combine these segments to give overall timestamps for each speaker's turn (e.g. {(0 -> 1.5, speaker_1), ...})
+    new_segments = []
+    prev_segment = cur_segment = segments[0]
+
+    for i in range(1, len(segments)):
+        cur_segment = segments[i]
+
+        # check if we have changed speaker ("label")
+        if cur_segment["label"] != prev_segment["label"] and i < len(segments):
+            # add the start/end times for the super-segment to the new list
+            new_segments.append(
+                {
+                    "segment": {
+                        "start": prev_segment["segment"]["start"],
+                        "end": cur_segment["segment"]["start"],
+                    },
+                    "speaker": prev_segment["label"],
+                }
+            )
+            prev_segment = segments[i]
+
+    # add the last segment(s) if there was no speaker change
+    new_segments.append(
+        {
+            "segment": {
+                "start": prev_segment["segment"]["start"],
+                "end": cur_segment["segment"]["end"],
+            },
+            "speaker": prev_segment["label"],
+        }
+    )
+
+    return new_segments
 
 
 def post_process_segments_and_transcripts(
@@ -140,7 +174,7 @@ def post_process_segments_and_transcripts(
     return segmented_preds
 
 
-def diarize(diarization_model, hf_token, device_id, file_name, outputs):
+def diarize(diarization_model, hf_token, device_id, file_name, outputs, group_by_speaker=False):
     diarization_pipeline = Pipeline.from_pretrained(
         checkpoint_path=diarization_model,
         use_auth_token=hf_token,
@@ -152,7 +186,8 @@ def diarize(diarization_model, hf_token, device_id, file_name, outputs):
     inputs, diarizer_inputs = preprocess_inputs(inputs=file_name)
 
     segments = diarize_audio(diarizer_inputs, diarization_pipeline)
+    print(segments)
 
     return post_process_segments_and_transcripts(
-        segments, outputs["chunks"], group_by_speaker=False
+        segments, outputs["chunks"], group_by_speaker=group_by_speaker
     )

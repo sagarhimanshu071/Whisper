@@ -3,6 +3,8 @@
 import tempfile
 import runpod
 import requests
+import logging
+import json
 import os
 import torch
 from transformers import (
@@ -29,42 +31,6 @@ def download_file(url):
     return temp_filename
 
 
-# def download_yt_audio(yt_url, filename):
-#     info_loader = youtube_dl.YoutubeDL()
-#     try:
-#         info = info_loader.extract_info(yt_url, download=False)
-#     except youtube_dl.utils.DownloadError as err:
-#         raise Exception(str(err))
-
-#     file_length = info["duration_string"]
-#     file_h_m_s = file_length.split(":")
-#     file_h_m_s = [int(sub_length) for sub_length in file_h_m_s]
-#     if len(file_h_m_s) == 1:
-#         file_h_m_s.insert(0, 0)
-#     if len(file_h_m_s) == 2:
-#         file_h_m_s.insert(0, 0)
-
-#     file_length_s = file_h_m_s[0] * 3600 + file_h_m_s[1] * 60 + file_h_m_s[2]
-#     if file_length_s > YT_LENGTH_LIMIT_S:
-#         yt_length_limit_hms = time.strftime(
-#             "%HH:%MM:%SS", time.gmtime(YT_LENGTH_LIMIT_S)
-#         )
-#         file_length_hms = time.strftime("%HH:%MM:%SS", time.gmtime(file_length_s))
-#         raise gr.Error(
-#             f"Maximum YouTube length is {yt_length_limit_hms}, got {file_length_hms} YouTube video."
-#         )
-
-#     ydl_opts = {
-#         "outtmpl": filename,
-#         "format": "worstvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-#     }
-#     with youtube_dl.YoutubeDL(ydl_opts) as ydl:
-#         try:
-#             ydl.download([yt_url])
-#         except youtube_dl.utils.ExtractorError as err:
-#             raise gr.Error(str(err))
-
-
 def download_youtube_video(yt_url):
     """Helper function to download a YouTube video to a temporary file."""
     ydl_opts = {
@@ -82,9 +48,8 @@ def download_youtube_video(yt_url):
             raise Exception(str(err))
 
 
-def transcribe(audio_path, chunk_length, batch_size):
+def transcribe(audio_path, chunk_length, batch_size, generate_kwargs, model_kwargs, model_id= "openai/whisper-large-v3"):
     """Run Whisper model inference on the given audio file."""
-    model_id = "openai/whisper-large-v3"
     torch_dtype = torch.float16
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     model_cache = "/cache/huggingface/hub"
@@ -110,7 +75,7 @@ def transcribe(audio_path, chunk_length, batch_size):
         model=model,
         tokenizer=tokenizer,
         feature_extractor=feature_extractor,
-        model_kwargs={"use_flash_attention_2": True},
+        model_kwargs=model_kwargs,
         torch_dtype=torch_dtype,
         device=device,
     )
@@ -120,11 +85,24 @@ def transcribe(audio_path, chunk_length, batch_size):
         audio_path,
         chunk_length_s=chunk_length,
         batch_size=batch_size,
-        generate_kwargs={"task": "transcribe", "language": None},
+        generate_kwargs=generate_kwargs,
         return_timestamps=True,
     )
 
     return outputs
+
+def call_webhook(data, url):
+    headers = {
+    'Content-Type': 'application/json'
+    }
+    try:
+        response = requests.request("POST", url, headers=headers, data=json.dumps(data))
+        if response.status_code == 200:
+            return "Success"
+        return "Failed"
+    except Exception as e:
+        logging.error("Failed to send data on webhook" + str(e))
+        return "Failed"
 
 
 # https://docs.runpod.io/serverless/workers/handlers/handler-async
@@ -139,35 +117,82 @@ def handler(job):
     diarization = job_input.get("diarization", False)
     translation = job_input.get("translation", False)
     language = job_input.get("language", "en")
+    group_by_speaker = job_input.get("group_by_speaker", False)
+    flash = job_input.get("flash", False)
+    device_id = job_input.get("device_id", "0")
+
+    webhook_url = job_input.get("webhook_url", None)
+    user_id = job_input.get("user_id")
+    session_id = job_input.get("session_id")
+    if webhook_url:
+        if not user_id or not session_id:
+            return "For sending data to webhook, user_id and session_id is required"
+    
 
     if not file_url:
         return "No audio URL provided."
 
     # Download the audio file
-    # TODO: Handle YouTube URLs
-    # TODO: stoarge of audio files
     audio_file_path = None
     if input_source.upper() == "URL":
         audio_file_path = download_file(file_url)
     elif input_source.upper() == "YOUTUBE":
         audio_file_path = download_youtube_video(file_url)
 
+    if device_id == "mps":
+        torch.mps.empty_cache()
+    ts = True  # Timestamps
+    generate_kwargs = {
+        "task": "translate" if translation else "transcribe",
+        "language": language,
+    }
+    model_kwargs = {"attn_implementation": "flash_attention_2"} if flash else {"attn_implementation": "sdpa"}
     # Run Whisper model inference
-    transcription = transcribe(audio_file_path, chunk_length, batch_size)
-
+    transcription = transcribe(audio_file_path, chunk_length, batch_size, generate_kwargs, model_kwargs, model_id)
+    # pipe = pipeline(
+    #     "automatic-speech-recognition",
+    #     model=model_id,
+    #     torch_dtype=torch.float16,
+    #     device="mps" if device_id == "mps" else f"cuda:{device_id}",
+    #     model_kwargs=model_kwargs,
+    # )
+    
+    # transcription = pipe(
+    #     audio_file_path,
+    #     chunk_length_s=30,
+    #     batch_size=batch_size,
+    #     generate_kwargs=generate_kwargs,
+    #     return_timestamps=ts,
+    # )
+    outputs = transcription
     if diarization:
         diarization_model = "pyannote/speaker-diarization-3.1"
         hf_token = os.getenv("HF_TOKEN")
         device_id = "0"
         speakers_transcript = diarize(
-            diarization_model, hf_token, device_id, audio_file_path, transcription
+            diarization_model, hf_token, device_id, audio_file_path, transcription, group_by_speaker
         )
-        return build_result(speakers_transcript, transcription)
+        outputs = build_result(speakers_transcript, transcription)
+        # Call Webhook
 
     # Cleanup: Remove the downloaded file
     os.remove(audio_file_path)
+    status = None
+    if webhook_url:
+        webhook_data = {
+            "output": {
+                "user_id": user_id,
+                "session_id": session_id,
+                "transcript_text": outputs.get("text", ""),
+                "diarized_text": outputs.get("speakers", []),
+                "detected_language": "en",
+                "segments": outputs.get("chunks", [])
+            }
+        }
+        status = call_webhook(webhook_data, webhook_url)
 
-    return transcription
+    outputs = {**outputs, "webhook_status": status}
+    return outputs
 
 
 runpod.serverless.start({"handler": handler})
